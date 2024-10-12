@@ -1,0 +1,384 @@
+const puppeteer = require('puppeteer');
+const path = require('path');
+const fs = require('fs');
+
+// Define a function to set the download path dynamically
+async function setDownloadBehavior(page, downloadPath) {
+    await page._client().send('Page.setDownloadBehavior', {
+        behavior: 'allow',
+        downloadPath: downloadPath
+    });
+}
+
+async function waitForFileDownload(downloadPath, timeout = 60000) {
+    const startTime = Date.now();
+    const defaultFilename = 'invoice_attachments.pdf';  // Default name for the downloaded PDF
+
+    let lastFileSize = 0;
+
+    while (true) {
+        const files = fs.readdirSync(downloadPath);
+        const downloadedFile = files.find(file => file === defaultFilename);
+
+        if (downloadedFile) {
+            const filePath = path.join(downloadPath, downloadedFile);
+            const { size } = fs.statSync(filePath);
+
+            if (size > 0 && size === lastFileSize) {
+                // If the file size hasn't changed for a while, assume download is complete
+                return downloadedFile;
+            }
+
+            lastFileSize = size;
+        }
+
+        if (Date.now() - startTime > timeout) {
+            throw new Error('Download timed out');
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 1000));  // Wait 1 second before checking again
+    }
+}
+
+// Function to sanitize invoice number (replace invalid characters)
+function sanitizeFilename(filename) {
+    return filename.replace(/[\/\\:*?"<>|\n]/g, '_').trim();  // Replace invalid characters with underscores and trim extra spaces
+}
+
+
+async function loginToEntrata(page, username, password) {
+    await page.goto(' https://indus.entrata.com/?module=authenticationxxx&action=view_login&return_url=');  // Update with actual Entrata login URL
+
+    await page.type('#company_user\\[username\\]', username);
+    await page.type('#company_user\\[password\\]', password);
+
+    await page.click('.btn-login');
+    await page.waitForNavigation();
+    console.log('Login successful');
+}
+
+async function handleContactInfoPrompt(page) {
+    try {
+        await page.waitForSelector('a[onclick="cancelContactInfoSetup();"]', { timeout: 5000 });
+        await page.click('a[onclick="cancelContactInfoSetup();"]');
+        console.log('Clicked "Remind Me Later"');
+    } catch (error) {
+        console.log('No contact info prompt appeared');
+    }
+}
+
+async function navigateToInvoicesPage(page) {
+    await page.hover('a#accounting');
+    await new Promise(resolve => setTimeout(resolve, 4000));
+
+    const invoiceElement = await page.waitForSelector('li.sub-dropdown-item a[href*="module=invoicesxxx"]');
+    await page.evaluate((element) => {
+        element.scrollIntoView();
+    }, invoiceElement);
+
+    try {
+        await invoiceElement.focus();
+        await invoiceElement.click();
+    } catch (error) {
+        await page.evaluate((element) => element.click(), invoiceElement);
+    }
+
+    await page.waitForNavigation();
+    console.log('Navigated to Invoices page');
+}
+
+async function selectProperty(page, propertyName) {
+    await page.waitForSelector('#addbutton');
+    await page.click('#addbutton');
+    console.log('Clicked "Add" button to show property list');
+
+    await page.waitForSelector('li.property-group-record');
+
+    const propertySelected = await page.evaluate((propertyName) => {
+        const properties = Array.from(document.querySelectorAll('li.property-group-record'));
+        const property = properties.find(el => el.innerText.includes(propertyName));
+        if (property) {
+            property.click();
+            return true;
+        }
+        return false;
+    }, propertyName);
+
+    if (propertySelected) {
+        console.log(`Selected property: ${propertyName}`);
+    } else {
+        console.log(`Property "${propertyName}" not found.`);
+    }
+}
+
+async function setDateFilters(page, startDate, endDate) {
+    const [startMonth, startDay, startYear] = startDate.split('/');
+    const [endMonth, endDay, endYear] = endDate.split('/');
+
+    // Set start date
+    await page.waitForSelector('input[name="report_filter[invoice_date][min-date]"]');
+    
+    // Double click and clear month, day, year and then type in new values for start date
+    await page.focus('input[name="report_filter[invoice_date][min-date]"]');
+    
+    await page.evaluate(() => {
+        const monthInput = document.querySelector('input[name="report_filter[invoice_date][min-date]"]').nextElementSibling;
+        const dayInput = monthInput.nextElementSibling.nextElementSibling;
+        const yearInput = dayInput.nextElementSibling.nextElementSibling;
+
+        monthInput.focus();
+        monthInput.select(); // Double click and select
+        monthInput.value = ''; // Clear the field
+    });
+    await page.keyboard.type(startMonth);
+    await new Promise(resolve => setTimeout(resolve, 1000)); // Delay
+
+    await page.evaluate(() => {
+        const dayInput = document.querySelector('input[name="report_filter[invoice_date][min-date]"]').nextElementSibling.nextElementSibling.nextElementSibling;
+        dayInput.focus();
+        dayInput.select();
+        dayInput.value = '';
+    });
+    await page.keyboard.type(startDay);
+    await new Promise(resolve => setTimeout(resolve, 1000)); // Delay
+
+    await page.evaluate(() => {
+        const yearInput = document.querySelector('input[name="report_filter[invoice_date][min-date]"]').nextElementSibling.nextElementSibling.nextElementSibling.nextElementSibling.nextElementSibling;
+        yearInput.focus();
+        yearInput.select();
+        yearInput.value = '';
+    });
+    await page.keyboard.type(startYear.slice(-2)); // Only use last two digits of the year
+    await new Promise(resolve => setTimeout(resolve, 1000)); // Delay
+
+    // Set end date
+    await page.waitForSelector('input[name="report_filter[invoice_date][max-date]"]');
+
+    // Double click and clear month, day, year and then type in new values for end date
+    await page.focus('input[name="report_filter[invoice_date][max-date]"]');
+    
+    await page.evaluate(() => {
+        const monthInput = document.querySelector('input[name="report_filter[invoice_date][max-date]"]').nextElementSibling;
+        const dayInput = monthInput.nextElementSibling.nextElementSibling;
+        const yearInput = dayInput.nextElementSibling.nextElementSibling;
+
+        monthInput.focus();
+        monthInput.select();
+        monthInput.value = '';
+    });
+    await page.keyboard.type(endMonth);
+    await new Promise(resolve => setTimeout(resolve, 1000)); // Delay
+
+    await page.evaluate(() => {
+        const dayInput = document.querySelector('input[name="report_filter[invoice_date][max-date]"]').nextElementSibling.nextElementSibling.nextElementSibling;
+        dayInput.focus();
+        dayInput.select();
+        dayInput.value = '';
+    });
+    await page.keyboard.type(endDay);
+    await new Promise(resolve => setTimeout(resolve, 1000)); // Delay
+
+    await page.evaluate(() => {
+        const yearInput = document.querySelector('input[name="report_filter[invoice_date][max-date]"]').nextElementSibling.nextElementSibling.nextElementSibling.nextElementSibling.nextElementSibling;
+        yearInput.focus();
+        yearInput.select();
+        yearInput.value = '';
+    });
+    await page.keyboard.type(endYear.slice(-2)); // Only use last two digits of the year
+    await new Promise(resolve => setTimeout(resolve, 1000)); // Delay
+
+    console.log(`Set date filter: Start Date = ${startDate}, End Date = ${endDate}`);
+}
+
+
+async function filterInvoices(page) {
+    await page.waitForSelector('a.button.action.green.submit-filter');
+    await page.click('a.button.action.green.submit-filter');
+    console.log('Clicked "Filter Invoices" button');
+
+    // Wait 3 seconds after filtering for the page to load completely
+    await new Promise(resolve => setTimeout(resolve, 3000));
+}
+
+async function processInvoiceRow(page, rowIndex, downloadPath) {
+    // Check if the row has an attachment (by checking for <i class="greenlight"></i>)
+    const hasAttachment = await page.evaluate((index) => {
+        const row = document.querySelectorAll('#property-1 tr.aRow, #property-1 tr.bRow')[index];
+        const attachmentIcon = row.querySelector('td.align-center i.greenlight');
+        return !!attachmentIcon;
+    }, rowIndex);
+
+    if (!hasAttachment) {
+        console.log(`Row ${rowIndex + 1}: No attachment found, skipping this row.`);
+        return;
+    }
+
+    // Capture the invoice number and vendor name from the current row using row index
+    let { invoiceNumber, vendorName } = await page.evaluate((index) => {
+        const row = document.querySelectorAll('#property-1 tr.aRow, #property-1 tr.bRow')[index];
+        const invoiceElement = row.querySelector('div.trunc em');
+        const vendorElement = row.querySelectorAll('td div.trunc')[1]; // Selecting the vendor name
+        
+        const invoiceNumber = invoiceElement ? invoiceElement.innerText.trim() : null;
+        const vendorName = vendorElement ? vendorElement.innerText.trim() : null;
+
+        return { invoiceNumber, vendorName };
+    }, rowIndex);
+
+    // If no invoice number or vendor name, skip the row
+    if (!invoiceNumber || !vendorName) {
+        console.log(`Row ${rowIndex + 1}: Missing invoice number or vendor name, skipping this row.`);
+        return;
+    }
+
+    // Sanitize the invoice number and vendor name to make it a valid file name
+    invoiceNumber = sanitizeFilename(invoiceNumber);
+    vendorName = sanitizeFilename(vendorName);
+    console.log(`Captured and sanitized invoice number: ${invoiceNumber}, vendor name: ${vendorName}`);
+
+    // Click the checkbox in the current row using row index
+    await page.evaluate((index) => {
+        const row = document.querySelectorAll('#property-1 tr.aRow, #property-1 tr.bRow')[index];
+        const checkbox = row.querySelector('input.invoiceToggleCheck');
+        checkbox.click();
+    }, rowIndex);
+
+    console.log('Clicked checkbox in the row');
+
+    // Click the down-arrow button to show the export options
+    await page.waitForSelector('a.button.action.last.menu-only');
+    await page.evaluate(() => {
+        const dropdownButton = document.querySelector('a.button.action.last.menu-only');
+        dropdownButton.click();
+    });
+
+    console.log('Clicked the down-arrow button');
+
+    // Click "Export Attachments" to download the PDF
+    await page.waitForSelector('li#exportBulkAttachments');
+    await page.evaluate(() => {
+        const exportAttachmentsButton = document.querySelector('li#exportBulkAttachments');
+        exportAttachmentsButton.click();
+    });
+
+    console.log('Clicked "Export Attachments" button');
+
+    // Wait for the PDF to download (monitoring the folder)
+    await setDownloadBehavior(page, downloadPath);
+
+    console.log('Waiting for the PDF to be downloaded...');
+    const downloadedFile = await waitForFileDownload(downloadPath);
+
+    // Rename the downloaded file with the invoice number and vendor name
+    const oldPath = path.join(downloadPath, downloadedFile);
+    const newPath = path.join(downloadPath, `${invoiceNumber}_${vendorName}.pdf`);
+    fs.renameSync(oldPath, newPath);
+    console.log(`Renamed downloaded PDF to: ${newPath}`);
+
+    // Uncheck the checkbox after downloading
+    await page.evaluate((index) => {
+        const row = document.querySelectorAll('#property-1 tr.aRow, #property-1 tr.bRow')[index];
+        const checkbox = row.querySelector('input.invoiceToggleCheck');
+        checkbox.click();  // Unselect the checkbox
+    }, rowIndex);
+
+    console.log('Unchecked the checkbox');
+}
+
+
+async function processAllRows(page, downloadPath) {
+    const rowCount = await page.evaluate(() => {
+        return document.querySelectorAll('#property-1 tr.aRow, #property-1 tr.bRow').length;
+    });
+    console.log(`Found ${rowCount} invoice rows to process`);
+
+    for (let i = 0; i < rowCount; i++) {
+        console.log(`Processing row ${i + 1} of ${rowCount}`);
+        await processInvoiceRow(page, i, downloadPath);
+
+        // Extra delay for the last row
+        if (i === rowCount - 1) {
+            console.log("Reached last row, adding extra time to ensure proper download and renaming...");
+            await new Promise(resolve => setTimeout(resolve, 10000));  // Extra 10 seconds for the last row
+        } else {
+            await new Promise(resolve => setTimeout(resolve, 5000));  // 5 seconds between rows
+        }
+    }
+
+    console.log('All rows processed');
+}
+
+async function processAllPages(page, downloadPath) {
+    let pageNumber = 1;
+
+    while (true) {
+        console.log(`Processing page ${pageNumber}...`);
+
+        // Process all rows on the current page
+        await processAllRows(page, downloadPath);
+
+        // Check if the "Next" button is clickable
+        const isNextButtonDisabled = await page.evaluate(() => {
+            const nextButton = document.querySelector('li.page-next a');
+            return nextButton ? nextButton.classList.contains('disabled') : true;
+        });
+
+        if (isNextButtonDisabled) {
+            console.log("No more pages to process, stopping...");
+            break;
+        }
+
+        // Click the "Next" button to go to the next page
+        console.log("Clicking the 'Next' button to proceed to the next page...");
+        await page.evaluate(() => {
+            document.querySelector('li.page-next a').click();
+        });
+
+        // Wait for the new page to load
+        console.log("Waiting for the next page to load...");
+        await new Promise(resolve => setTimeout(resolve, 5000));
+
+        pageNumber++;
+    }
+
+    console.log('All pages processed');
+}
+
+(async () => {
+    const browser = await puppeteer.launch({ headless: false });
+    const page = await browser.newPage();
+
+    // Set the viewport size to make the screen larger
+    await page.setViewport({ width: 1600, height: 1000 });
+
+    const username = 'xxxxxxxx';
+    const password = 'xxxxxxxx';  // Replace with actual password
+    const propertyName = 'xxxxxxxx';  // Replace with desired property name
+    const startDate = '01/01/2022';  // Start date filter
+    const endDate = '12/31/2022';    // End date filter
+
+    // Specify download path
+    const downloadPath = 'ENTER YOUR DOWNLOAD PATH';
+    
+
+    // Ensure the download directory exists
+    if (!fs.existsSync(downloadPath)) {
+        fs.mkdirSync(downloadPath, { recursive: true });
+    }
+
+    // Start the process
+    await loginToEntrata(page, username, password);
+    await handleContactInfoPrompt(page);
+    await navigateToInvoicesPage(page);
+    await selectProperty(page, propertyName);
+    await setDateFilters(page, startDate, endDate);
+    await filterInvoices(page);
+
+    // Process all pages
+    await processAllPages(page, downloadPath);
+
+    await browser.close();
+})();
+
+
+// https://indus.entrata.com/?module=authenticationxxx&action=view_login&return_url=
